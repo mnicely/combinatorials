@@ -18,7 +18,7 @@ This example uses the [combinatorial number system](https://en.wikipedia.org/wik
 
 ### Optimizations
 1. The denominator of the binomial coefficient is precalculate on the CPU and copied to constant memory.
-2. The number of valid spanning trees are summed using the [CUB BlockReduce](https://nvlabs.github.io/cub/classcub_1_1_block_reduce.html) before using [CUB DeviceReduce](https://nvlabs.github.io/cub/structcub_1_1_device_reduce.html). The minimizes the number of results stored to global memory per block and minimizes the number of loads when DeviceReduce is called.
+2. The number of valid spanning trees are summed using the [CUB BlockReduce](https://nvlabs.github.io/cub/classcub_1_1_block_reduce.html) before using [CUB DeviceReduce](https://nvlabs.github.io/cub/structcub_1_1_device_reduce.html). This minimizes the number of results stored to global memory per block and minimizes the number of loads when DeviceReduce is called.
 3. OpenMP is used to utilize multiple GPUs on a system.
 
 ### Results
