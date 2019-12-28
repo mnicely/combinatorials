@@ -169,10 +169,9 @@ __launch_bounds__( k_tpb ) __global__ void tdoa( const unsigned int offset,
                 // If the minimum spanning tree has a cost
                 // less than the number of edges, than it
                 // is not a valid spanning tree
-                if ( cost == k_numEdges ) {
+                if ( cost == k_numEdges )
                     score[s] = 1u;
-                    // std::printf("tid %u = %d %d %d\n", newTid[s], combo[0], combo[1], combo[2]);
-                } else
+                else
                     score[s] = 0u;
 
             } else
@@ -227,8 +226,6 @@ int main( int arg, char **argv ) {
         }
         start++;
     }
-    // for ( int i = 0; i < k_numCombos; i++ )
-    //     std::printf("%d %d\n", edges[i].a, edges[i].b);
 
     // Get device attributes
     int numDevices {};
@@ -236,8 +233,6 @@ int main( int arg, char **argv ) {
     checkCudaErrors( cudaGetDeviceCount( &numDevices ) );
     checkCudaErrors( cudaDeviceGetAttribute( &numSMs, cudaDevAttrMultiProcessorCount, 0 ) );
     std::printf( "Number of GPUs = %d\n", numDevices );
-
-    // numDevices =1;
 
     // Create streams
     const int    num_streams = numDevices;
