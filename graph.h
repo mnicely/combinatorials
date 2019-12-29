@@ -1,3 +1,15 @@
+/*
+ * Source
+ * https://www.geeksforgeeks.org/detect-cycle-undirected-graph/
+ * 
+ * We do a DFS traversal of the given graph. For every visited vertex ‘v’, 
+ * if there is an adjacent ‘u’ such that u is already visited and u 
+ * is not parent of v, then there is a cycle in graph. If we don’t 
+ * find such an adjacent for any vertex, we say that there is no cycle. 
+ * The assumption of this approach is that there are no parallel 
+ * edges between any two vertices.
+ */
+
 #include <list>
 
 // Class for an undirected graph
