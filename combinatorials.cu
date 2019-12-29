@@ -235,8 +235,16 @@ int main( int arg, char **argv ) {
     // Pinned memory is required for async copies
     thrust::host_vector<unsigned int, thrust::cuda::experimental::pinned_allocator<unsigned int>> h_totalTrees(
         numDevices, 0 );
-
+    
+    // Divide up work between all GPUs
     gpuData gpuWork[numDevices] {};
+    unsigned int chunk = static_cast<unsigned int>( numChains / numDevices );
+    unsigned int temp  = numChains;
+    for ( int d = numDevices; d > 0; d-- ) {
+        gpuWork[d - 1].offset          = ( d - 1 ) * chunk;
+        gpuWork[d - 1].chainsPerDevice = temp;
+        temp -= chunk;
+    }
 
     // Launch one CPU thread per GPU
     omp_set_num_threads( numDevices );
@@ -264,16 +272,6 @@ int main( int arg, char **argv ) {
         // Copy angles to constant memory
         checkCudaErrors( cudaMemcpyToSymbolAsync(
             c_edges, edges, k_numCombos * sizeof( edgeData ), 0, cudaMemcpyHostToDevice, gpuWork[ompId].streams ) );
-    }
-
-    // Divide up work between all GPUs
-    // gpuData      gpuWork[numDevices] {};
-    unsigned int chunk = static_cast<unsigned int>( numChains / numDevices );
-    unsigned int temp  = numChains;
-    for ( int d = numDevices; d > 0; d-- ) {
-        gpuWork[d - 1].offset          = ( d - 1 ) * chunk;
-        gpuWork[d - 1].chainsPerDevice = temp;
-        temp -= chunk;
     }
 
     // Start timer
