@@ -5,7 +5,6 @@
  *      Author: mnicely
  */
 
-#include <cmath>
 #include <cooperative_groups.h>
 #include <cub/block/block_reduce.cuh>
 #include <cuda_runtime.h>
@@ -29,9 +28,9 @@ constexpr double factorial( const int &n ) {
 constexpr unsigned int k_tpb { 512 };
 constexpr int          k_ept { 8 };
 constexpr int          k_numNodes { 10 };
-constexpr int          k_numEdges { k_numNodes - 1 };
-constexpr int          k_numCombos { ( k_numNodes * ( k_numNodes - 1 ) ) / 2 };
-constexpr int          k_treeStart { k_numCombos - 1 };
+constexpr int          k_numEdges { 9 };
+constexpr int          k_numVertices { ( k_numNodes * ( k_numNodes - 1 ) ) / 2 };
+constexpr int          k_treeStart { k_numVertices - 1 };
 
 /*
  * Structure hold edge and angle information
@@ -46,7 +45,7 @@ typedef struct fEdgeData_t {
  */
 typedef struct fgpuData_t {
     unsigned int  offset {};
-    unsigned int  chainsPerDevice {};
+    unsigned int  treesMaxDevice {};
     unsigned int *d_totalTreesPerBlock {};
     cudaStream_t  streams {};
 } gpuData;
@@ -55,7 +54,7 @@ typedef struct fgpuData_t {
  * Constant memory holds read-only data in cached global memory
  */
 __constant__ double c_denominator[k_numEdges];
-__constant__ edgeData c_edges[k_numCombos];
+__constant__ edgeData c_edges[k_numVertices];
 
 /*
  * Calculate binomial coefficients
@@ -76,13 +75,13 @@ __host__ __device__ unsigned int nchoosek( const int &numerator, const double &d
  * an answer in lexicographic order
  */
 __host__ __device__ void
-         getTree( const unsigned int &numChains, const unsigned int &id, const double *denominator, int *combo ) {
+         getTree( const unsigned int &maxTrees, const unsigned int &id, const double *denominator, int *combo ) {
 
     unsigned int n {};
-    unsigned int key { numChains - id - 1 };
+    unsigned int key { maxTrees - id - 1 };
 #pragma unroll k_numEdges
     for ( int e = 0; e < k_numEdges; e++ ) {
-        int numerator = k_treeStart;
+        int numerator { k_treeStart };
         while ( true ) {
             // The denominator must start at the end of the array
             n = nchoosek( numerator, denominator[e], ( k_numEdges - e ) );
@@ -112,8 +111,8 @@ __device__ int find( const int &x, int *parent ) {
  * we need to pad the last block in the last grid
  */
 __launch_bounds__( k_tpb ) __global__ void tdoa( const unsigned int offset,
-                                                 const unsigned int chainsPerDevice,
-                                                 const unsigned int numChains,
+                                                 const unsigned int treesPerDevice,
+                                                 const unsigned int maxTrees,
                                                  const unsigned int padding,
                                                  unsigned int *__restrict__ d_totalTreesPerBlock ) {
 
@@ -138,11 +137,11 @@ __launch_bounds__( k_tpb ) __global__ void tdoa( const unsigned int offset,
             newTid[s] = offset + tid * k_ept + s;
 
             // Ensure only valid combinations are checked
-            if ( newTid[s] < chainsPerDevice ) {
+            if ( newTid[s] < treesPerDevice ) {
 
                 // Find tree
                 int combo[k_numEdges] {};
-                getTree( numChains, newTid[s], c_denominator, combo );
+                getTree( maxTrees, newTid[s], c_denominator, combo );
 
                 // Determine is chain is valid spanning tree
                 // Use Kruskal's algorithm with each edge weight set to 1
@@ -169,12 +168,12 @@ __launch_bounds__( k_tpb ) __global__ void tdoa( const unsigned int offset,
                     score[s] = 1u;
                 else
                     score[s] = 0u;
-                
+
             } else
                 score[s] = 0u; // For thread ids larger than the number of required combinations
         }
 
-        unsigned int totalTrees = BlockReduce( temp_storage ).Sum( score );
+        unsigned int totalTrees { BlockReduce( temp_storage ).Sum( score ) };
 
         // Once BlockReduce is finished, the sum
         // is now stored in the first address of the score array
@@ -192,12 +191,13 @@ __launch_bounds__( k_tpb ) __global__ void tdoa( const unsigned int offset,
 int main( int arg, char **argv ) {
 
     // Determine the number of combinations that will be evaluated
-    unsigned int numChains { nchoosek( k_numCombos, ( 1 / factorial( k_numEdges ) ), k_numEdges ) };
-    if ( numChains >= UINT_MAX ) { // numChains can't be larger than 4294967295
-        std::printf( "combos = %d; chains = %u\n", k_numCombos, numChains );
+    unsigned int maxTrees { nchoosek( k_numVertices, ( 1 / factorial( k_numEdges ) ), k_numEdges ) };
+    if ( maxTrees >= UINT_MAX ) { // maxTrees can't be larger than 4294967295
+        std::printf( "combos = %d; chains = %u\n", k_numVertices, maxTrees );
         throw std::runtime_error( "The number is chains to test is larger than unsigned int can hold.\n" );
     }
-    std::printf( "combos = %d; chains = %u\n", k_numCombos, numChains );
+    std::printf( "Number of Vertices = %d\n", k_numVertices );
+    std::printf( "Max Trees Possible = %u\n", maxTrees );
 
     // Precompute all possible denominators recipicals
     // Multiplication requires less operations than division
@@ -206,9 +206,9 @@ int main( int arg, char **argv ) {
         denominator[k_numEdges - i] = 1 / factorial( i );
 
     // Generate all possible edges of graph in lexicographic order
-    edgeData edges[k_numCombos] {};
-    int      start = 1;
-    int      idx   = 0;
+    edgeData edges[k_numVertices] {};
+    int      start { 1 };
+    int      idx {};
     for ( int i = 0; i < k_numNodes; i++ ) {
         for ( int j = start; j < k_numNodes; j++ ) {
             edges[idx].a = i;
@@ -227,22 +227,22 @@ int main( int arg, char **argv ) {
 
     // Padding blocks so we can use CUB BlockReduce in CUDA kernel
     unsigned int padding { static_cast<unsigned int>(
-        std::ceil( static_cast<double>( numChains / k_ept / numDevices ) / static_cast<double>( k_tpb ) ) * k_tpb ) };
-
-    std::printf( "Padding = %u\n", padding );
+        std::ceil( static_cast<double>( maxTrees ) / static_cast<double>( k_ept ) / static_cast<double>( numDevices ) /
+                   static_cast<double>( k_tpb ) ) *
+        k_tpb ) };
 
     // Will store final results for each GPU using pinned memory
     // Pinned memory is required for async copies
     thrust::host_vector<unsigned int, thrust::cuda::experimental::pinned_allocator<unsigned int>> h_totalTrees(
         numDevices, 0 );
-    
+
     // Divide up work between all GPUs
-    gpuData gpuWork[numDevices] {};
-    unsigned int chunk = static_cast<unsigned int>( numChains / numDevices );
-    unsigned int temp  = numChains;
+    gpuData      gpuWork[numDevices] {};
+    unsigned int chunk { static_cast<unsigned int>( maxTrees / numDevices ) };
+    unsigned int temp { maxTrees };
     for ( int d = numDevices; d > 0; d-- ) {
-        gpuWork[d - 1].offset          = ( d - 1 ) * chunk;
-        gpuWork[d - 1].chainsPerDevice = temp;
+        gpuWork[d - 1].offset         = ( d - 1 ) * chunk;
+        gpuWork[d - 1].treesMaxDevice = temp;
         temp -= chunk;
     }
 
@@ -250,7 +250,7 @@ int main( int arg, char **argv ) {
     omp_set_num_threads( numDevices );
 #pragma omp parallel
     {
-        int ompId = omp_get_thread_num( );
+        int ompId { omp_get_thread_num( ) };
 
         // We must set the device in each thread
         // so the correct CUDA context is visible
@@ -271,12 +271,12 @@ int main( int arg, char **argv ) {
 
         // Copy angles to constant memory
         checkCudaErrors( cudaMemcpyToSymbolAsync(
-            c_edges, edges, k_numCombos * sizeof( edgeData ), 0, cudaMemcpyHostToDevice, gpuWork[ompId].streams ) );
+            c_edges, edges, k_numVertices * sizeof( edgeData ), 0, cudaMemcpyHostToDevice, gpuWork[ompId].streams ) );
     }
 
     // Start timer
-    cudaEvent_t startEvent = nullptr;
-    cudaEvent_t stopEvent  = nullptr;
+    cudaEvent_t startEvent { nullptr };
+    cudaEvent_t stopEvent { nullptr };
     float       elapsed_gpu_ms {};
 
     cudaEventCreate( &startEvent, cudaEventBlockingSync );
@@ -286,7 +286,7 @@ int main( int arg, char **argv ) {
 
 #pragma omp parallel
     {
-        int ompId = omp_get_thread_num( );
+        int ompId { omp_get_thread_num( ) };
         checkCudaErrors( cudaSetDevice( ompId ) );
 
         // The number of blocks launched is based on the number of
@@ -295,8 +295,8 @@ int main( int arg, char **argv ) {
         dim3 blocksPerGrid { static_cast<uint>( 20 * numSMs ) };
 
         void *args[] { &gpuWork[ompId].offset,
-                       &gpuWork[ompId].chainsPerDevice,
-                       &numChains,
+                       &gpuWork[ompId].treesMaxDevice,
+                       &maxTrees,
                        &padding,
                        &gpuWork[ompId].d_totalTreesPerBlock };
 
@@ -323,19 +323,15 @@ int main( int arg, char **argv ) {
 
     unsigned int h_total { std::accumulate( h_totalTrees.begin( ), h_totalTrees.end( ), 0u ) };
 
-    unsigned int cayley =
-        static_cast<unsigned int>( pow( static_cast<double>( k_numNodes ), static_cast<double>( k_numNodes - 2 ) ) );
-    std::printf( "Trees Found = %u: Cayley's formula = %u\n", h_total, cayley );
-
-    if ( h_total == cayley )
-        std::printf( "Found correct number of trees!!\n" );
+    if ( ( k_numNodes - 1 ) == k_numEdges )
+        std::printf( "%u trees found\n", h_total );
     else
-        std::printf( "Error!!\n" );
+        std::printf( "%u forests found\n", h_total );
 
         // Data clean up
 #pragma omp parallel
     {
-        int ompId = omp_get_thread_num( );
+        int ompId { omp_get_thread_num( ) };
         checkCudaErrors( cudaSetDevice( ompId ) );
         checkCudaErrors( cudaFree( gpuWork[ompId].d_totalTreesPerBlock ) );
         checkCudaErrors( cudaStreamDestroy( gpuWork[ompId].streams ) );
