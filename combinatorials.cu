@@ -7,7 +7,7 @@
 
 #include <cmath>
 #include <cooperative_groups.h>
-#include <cub/cub.cuh>
+#include <cub/block/block_reduce.cuh>
 #include <cuda_runtime.h>
 #include <helper_cuda.h>
 #include <numeric>
@@ -36,21 +36,20 @@ constexpr int          k_treeStart { k_numCombos - 1 };
 /*
  * Structure hold edge and angle information
  */
-typedef struct fEdges_t {
+typedef struct fEdgeData_t {
     int a {};
     int b {};
 } edgeData;
 
 /*
- * Structure holds array information for CUB Device Radix Sort
- * It will hold arrays for each GPU in each CPU thread (OpenMP)
+ * Structure to hold all combos and scores for testing
  */
-typedef struct fCUB_t {
+typedef struct fgpuData_t {
+    unsigned int  offset {};
+    unsigned int  chainsPerDevice {};
     unsigned int *d_totalTreesPerBlock {};
-    unsigned int *d_totalTreesPerDevice {};
-    void *        d_temp_storage     = NULL;
-    size_t        temp_storage_bytes = 0;
-} cubData;
+    cudaStream_t  streams {};
+} gpuData;
 
 /*
  * Constant memory holds read-only data in cached global memory
@@ -113,6 +112,7 @@ __device__ int find( const int &x, int *parent ) {
  * we need to pad the last block in the last grid
  */
 __launch_bounds__( k_tpb ) __global__ void tdoa( const unsigned int offset,
+                                                 const unsigned int chainsPerDevice,
                                                  const unsigned int numChains,
                                                  const unsigned int padding,
                                                  unsigned int *__restrict__ d_totalTreesPerBlock ) {
@@ -127,7 +127,6 @@ __launch_bounds__( k_tpb ) __global__ void tdoa( const unsigned int offset,
 
     unsigned int gid { blockIdx.x * blockDim.x + threadIdx.x }; // Change name
     unsigned int stride { blockDim.x * gridDim.x };
-    unsigned int blockId { blockIdx.x };
     unsigned int newTid[k_ept] {};
     unsigned int score[k_ept] {};
 
@@ -139,7 +138,7 @@ __launch_bounds__( k_tpb ) __global__ void tdoa( const unsigned int offset,
             newTid[s] = offset + tid * k_ept + s;
 
             // Ensure only valid combinations are checked
-            if ( newTid[s] < numChains ) {
+            if ( newTid[s] < chainsPerDevice ) {
 
                 // Find tree
                 int combo[k_numEdges] {};
@@ -157,11 +156,8 @@ __launch_bounds__( k_tpb ) __global__ void tdoa( const unsigned int offset,
                 for ( int e = 0; e < k_numEdges; e++ ) {
                     int findX = find( c_edges[combo[e]].a, parent );
                     int findY = find( c_edges[combo[e]].b, parent );
-                    if ( findX == findY ) {
-
+                    if ( findX == findY )
                         continue;
-                    }
-                    // printf("tid = %d: %d %d\n", newTid[s], findX, findY);
                     cost++;
                     parent[findX] = findY;
                 }
@@ -173,7 +169,7 @@ __launch_bounds__( k_tpb ) __global__ void tdoa( const unsigned int offset,
                     score[s] = 1u;
                 else
                     score[s] = 0u;
-
+                
             } else
                 score[s] = 0u; // For thread ids larger than the number of required combinations
         }
@@ -186,12 +182,7 @@ __launch_bounds__( k_tpb ) __global__ void tdoa( const unsigned int offset,
         // then stored to global memory to the address pertaining
         // to that blockId
         if ( threadIdx.x == 0 )
-            d_totalTreesPerBlock[blockId] = totalTrees;
-
-        // Because we are using grid-stride looping, where we
-        // reuse blocks in a grid, to minimize launch overhead,
-        // we need to increment the blockId
-        blockId += gridDim.x;
+            atomicAdd( &d_totalTreesPerBlock[0], totalTrees );
 
         // We need to sync the block again because we are using grid-stride looping.
         block.sync( ); // Sync block to reuse tempStorage for BlockReduce
@@ -234,22 +225,18 @@ int main( int arg, char **argv ) {
     checkCudaErrors( cudaDeviceGetAttribute( &numSMs, cudaDevAttrMultiProcessorCount, 0 ) );
     std::printf( "Number of GPUs = %d\n", numDevices );
 
-    // Create streams
-    const int    num_streams = numDevices;
-    cudaStream_t streams[num_streams];
-
     // Padding blocks so we can use CUB BlockReduce in CUDA kernel
     unsigned int padding { static_cast<unsigned int>(
         std::ceil( static_cast<double>( numChains / k_ept / numDevices ) / static_cast<double>( k_tpb ) ) * k_tpb ) };
+
+    std::printf( "Padding = %u\n", padding );
 
     // Will store final results for each GPU using pinned memory
     // Pinned memory is required for async copies
     thrust::host_vector<unsigned int, thrust::cuda::experimental::pinned_allocator<unsigned int>> h_totalTrees(
         numDevices, 0 );
 
-    unsigned int numBlocksRequired { static_cast<unsigned int>( padding / k_tpb ) };
-
-    cubData cubStruct[numDevices] {};
+    gpuData gpuWork[numDevices] {};
 
     // Launch one CPU thread per GPU
     omp_set_num_threads( numDevices );
@@ -260,20 +247,33 @@ int main( int arg, char **argv ) {
         // We must set the device in each thread
         // so the correct CUDA context is visible
         checkCudaErrors( cudaSetDevice( ompId ) );
-        checkCudaErrors( cudaStreamCreate( &streams[ompId] ) );
+        checkCudaErrors( cudaStreamCreate( &gpuWork[ompId].streams ) );
 
-        checkCudaErrors( cudaMalloc( reinterpret_cast<void **>( &cubStruct[ompId].d_totalTreesPerBlock ),
-                                     numBlocksRequired * sizeof( unsigned int ) ) );
-        checkCudaErrors( cudaMalloc( reinterpret_cast<void **>( &cubStruct[ompId].d_totalTreesPerDevice ),
-                                     numBlocksRequired * sizeof( unsigned int ) ) );
+        // Allocate memory to hold total number of valid trees per block and device
+        checkCudaErrors(
+            cudaMalloc( reinterpret_cast<void **>( &gpuWork[ompId].d_totalTreesPerBlock ), sizeof( unsigned int ) ) );
 
         // Copy denominators to constant memory
-        checkCudaErrors( cudaMemcpyToSymbolAsync(
-            c_denominator, denominator, k_numEdges * sizeof( double ), 0, cudaMemcpyHostToDevice, streams[ompId] ) );
+        checkCudaErrors( cudaMemcpyToSymbolAsync( c_denominator,
+                                                  denominator,
+                                                  k_numEdges * sizeof( double ),
+                                                  0,
+                                                  cudaMemcpyHostToDevice,
+                                                  gpuWork[ompId].streams ) );
 
         // Copy angles to constant memory
         checkCudaErrors( cudaMemcpyToSymbolAsync(
-            c_edges, edges, k_numCombos * sizeof( edgeData ), 0, cudaMemcpyHostToDevice, streams[ompId] ) );
+            c_edges, edges, k_numCombos * sizeof( edgeData ), 0, cudaMemcpyHostToDevice, gpuWork[ompId].streams ) );
+    }
+
+    // Divide up work between all GPUs
+    // gpuData      gpuWork[numDevices] {};
+    unsigned int chunk = static_cast<unsigned int>( numChains / numDevices );
+    unsigned int temp  = numChains;
+    for ( int d = numDevices; d > 0; d-- ) {
+        gpuWork[d - 1].offset          = ( d - 1 ) * chunk;
+        gpuWork[d - 1].chainsPerDevice = temp;
+        temp -= chunk;
     }
 
     // Start timer
@@ -296,43 +296,24 @@ int main( int arg, char **argv ) {
         dim3 threadPerBlock { k_tpb };
         dim3 blocksPerGrid { static_cast<uint>( 20 * numSMs ) };
 
-        // Each GPU will work on a portion of the possible combinations
-        unsigned int offset { ompId * padding * k_ept };
-
-        void *args[] { &offset, &numChains, &padding, &cubStruct[ompId].d_totalTreesPerBlock };
+        void *args[] { &gpuWork[ompId].offset,
+                       &gpuWork[ompId].chainsPerDevice,
+                       &numChains,
+                       &padding,
+                       &gpuWork[ompId].d_totalTreesPerBlock };
 
         checkCudaErrors( cudaLaunchKernel(
-            reinterpret_cast<void *>( &tdoa ), blocksPerGrid, threadPerBlock, args, 0, streams[ompId] ) );
-
-        checkCudaErrors( cub::DeviceReduce::Sum( cubStruct[ompId].d_temp_storage,
-                                                 cubStruct[ompId].temp_storage_bytes,
-                                                 cubStruct[ompId].d_totalTreesPerBlock,
-                                                 cubStruct[ompId].d_totalTreesPerDevice,
-                                                 numBlocksRequired,
-                                                 streams[ompId],
-                                                 false ) );
-
-        // Allocate temporary storage
-        checkCudaErrors( cudaMalloc( &cubStruct[ompId].d_temp_storage, cubStruct[ompId].temp_storage_bytes ) );
-
-        // Run sorting operation
-        checkCudaErrors( cub::DeviceReduce::Sum( cubStruct[ompId].d_temp_storage,
-                                                 cubStruct[ompId].temp_storage_bytes,
-                                                 cubStruct[ompId].d_totalTreesPerBlock,
-                                                 cubStruct[ompId].d_totalTreesPerDevice,
-                                                 numBlocksRequired,
-                                                 streams[ompId],
-                                                 false ) );
+            reinterpret_cast<void *>( &tdoa ), blocksPerGrid, threadPerBlock, args, 0, gpuWork[ompId].streams ) );
 
         // Scores and ids are copied back to the CPU in parallel
         checkCudaErrors( cudaMemcpyAsync( &h_totalTrees[ompId],
-                                          cubStruct[ompId].d_totalTreesPerDevice,
+                                          gpuWork[ompId].d_totalTreesPerBlock,
                                           sizeof( unsigned int ),
                                           cudaMemcpyDeviceToHost,
-                                          streams[ompId] ) );
+                                          gpuWork[ompId].streams ) );
 
         // Sync each stream to ensure data copy is complete
-        checkCudaErrors( cudaStreamSynchronize( streams[ompId] ) );
+        checkCudaErrors( cudaStreamSynchronize( gpuWork[ompId].streams ) );
     }
 
     // Stop timer
@@ -358,10 +339,8 @@ int main( int arg, char **argv ) {
     {
         int ompId = omp_get_thread_num( );
         checkCudaErrors( cudaSetDevice( ompId ) );
-        checkCudaErrors( cudaFree( cubStruct[ompId].d_temp_storage ) );
-        checkCudaErrors( cudaFree( cubStruct[ompId].d_totalTreesPerBlock ) );
-        checkCudaErrors( cudaFree( cubStruct[ompId].d_totalTreesPerDevice ) );
-        checkCudaErrors( cudaStreamDestroy( streams[ompId] ) );
+        checkCudaErrors( cudaFree( gpuWork[ompId].d_totalTreesPerBlock ) );
+        checkCudaErrors( cudaStreamDestroy( gpuWork[ompId].streams ) );
     }
 
     return ( EXIT_SUCCESS );
