@@ -36,12 +36,31 @@
 #include <cooperative_groups.h>
 #include <cub/block/block_reduce.cuh>
 #include <cuda_runtime.h>
-#include <helper_cuda.h>
 #include <numeric>
 #include <omp.h>
 #include <thrust/host_vector.h>
 #include <thrust/sort.h>
 #include <thrust/system/cuda/experimental/pinned_allocator.h>
+
+
+// *************** FOR ERROR CHECKING *******************
+#ifndef CUDA_RT_CALL
+#define CUDA_RT_CALL( call )                                                                                           \
+    {                                                                                                                  \
+        auto status = static_cast<cudaError_t>( call );                                                                \
+        if ( status != cudaSuccess )                                                                                   \
+            fprintf( stderr,                                                                                           \
+                     "ERROR: CUDA RT call \"%s\" in line %d of file %s failed "                                        \
+                     "with "                                                                                           \
+                     "%s (%d).\n",                                                                                     \
+                     #call,                                                                                            \
+                     __LINE__,                                                                                         \
+                     __FILE__,                                                                                         \
+                     cudaGetErrorString( status ),                                                                     \
+                     status );                                                                                         \
+    }
+#endif  // CUDA_RT_CALL
+// *************** FOR ERROR CHECKING *******************
 
 /*
  * Factorial required for combinatorial number system
@@ -249,8 +268,8 @@ int main( int arg, char **argv ) {
     // Get device attributes
     int numDevices {};
     int numSMs {};
-    checkCudaErrors( cudaGetDeviceCount( &numDevices ) );
-    checkCudaErrors( cudaDeviceGetAttribute( &numSMs, cudaDevAttrMultiProcessorCount, 0 ) );
+    CUDA_RT_CALL( cudaGetDeviceCount( &numDevices ) );
+    CUDA_RT_CALL( cudaDeviceGetAttribute( &numSMs, cudaDevAttrMultiProcessorCount, 0 ) );
     std::printf( "Number of GPUs = %d\n", numDevices );
 
     // Padding blocks so we can use CUB BlockReduce in CUDA kernel
@@ -282,15 +301,15 @@ int main( int arg, char **argv ) {
 
         // We must set the device in each thread
         // so the correct CUDA context is visible
-        checkCudaErrors( cudaSetDevice( ompId ) );
-        checkCudaErrors( cudaStreamCreate( &gpuWork[ompId].streams ) );
+        CUDA_RT_CALL( cudaSetDevice( ompId ) );
+        CUDA_RT_CALL( cudaStreamCreate( &gpuWork[ompId].streams ) );
 
         // Allocate memory to hold total number of valid trees per block and device
-        checkCudaErrors(
+        CUDA_RT_CALL(
             cudaMalloc( reinterpret_cast<void **>( &gpuWork[ompId].d_totalTreesPerBlock ), sizeof( unsigned int ) ) );
 
         // Copy denominators to constant memory
-        checkCudaErrors( cudaMemcpyToSymbolAsync( c_denominator,
+        CUDA_RT_CALL( cudaMemcpyToSymbolAsync( c_denominator,
                                                   denominator,
                                                   k_numEdges * sizeof( double ),
                                                   0,
@@ -298,7 +317,7 @@ int main( int arg, char **argv ) {
                                                   gpuWork[ompId].streams ) );
 
         // Copy angles to constant memory
-        checkCudaErrors( cudaMemcpyToSymbolAsync(
+        CUDA_RT_CALL( cudaMemcpyToSymbolAsync(
             c_edges, edges, k_numVertices * sizeof( edgeData ), 0, cudaMemcpyHostToDevice, gpuWork[ompId].streams ) );
     }
 
@@ -315,7 +334,7 @@ int main( int arg, char **argv ) {
 #pragma omp parallel
     {
         int ompId { omp_get_thread_num( ) };
-        checkCudaErrors( cudaSetDevice( ompId ) );
+        CUDA_RT_CALL( cudaSetDevice( ompId ) );
 
         // The number of blocks launched is based on the number of
         // Streaming Multiprocessor available on the GPU
@@ -328,18 +347,18 @@ int main( int arg, char **argv ) {
                        &padding,
                        &gpuWork[ompId].d_totalTreesPerBlock };
 
-        checkCudaErrors( cudaLaunchKernel(
+        CUDA_RT_CALL( cudaLaunchKernel(
             reinterpret_cast<void *>( &tdoa ), blocksPerGrid, threadPerBlock, args, 0, gpuWork[ompId].streams ) );
 
         // Scores and ids are copied back to the CPU in parallel
-        checkCudaErrors( cudaMemcpyAsync( &h_totalTrees[ompId],
+        CUDA_RT_CALL( cudaMemcpyAsync( &h_totalTrees[ompId],
                                           gpuWork[ompId].d_totalTreesPerBlock,
                                           sizeof( unsigned int ),
                                           cudaMemcpyDeviceToHost,
                                           gpuWork[ompId].streams ) );
 
         // Sync each stream to ensure data copy is complete
-        checkCudaErrors( cudaStreamSynchronize( gpuWork[ompId].streams ) );
+        CUDA_RT_CALL( cudaStreamSynchronize( gpuWork[ompId].streams ) );
     }
 
     // Stop timer
@@ -360,9 +379,9 @@ int main( int arg, char **argv ) {
 #pragma omp parallel
     {
         int ompId { omp_get_thread_num( ) };
-        checkCudaErrors( cudaSetDevice( ompId ) );
-        checkCudaErrors( cudaFree( gpuWork[ompId].d_totalTreesPerBlock ) );
-        checkCudaErrors( cudaStreamDestroy( gpuWork[ompId].streams ) );
+        CUDA_RT_CALL( cudaSetDevice( ompId ) );
+        CUDA_RT_CALL( cudaFree( gpuWork[ompId].d_totalTreesPerBlock ) );
+        CUDA_RT_CALL( cudaStreamDestroy( gpuWork[ompId].streams ) );
     }
 
     return ( EXIT_SUCCESS );
