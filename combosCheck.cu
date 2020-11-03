@@ -317,15 +317,17 @@ int main( int arg, char **argv ) {
 
     // Divide up work between all GPUs
     unsigned int chunk { static_cast<unsigned int>( maxTrees / numDevices ) };
-    unsigned int temp { maxTrees };
 
-    for ( int d = numDevices; d > 0; d-- ) {
-        gpuWork[d - 1].offset         = ( d - 1 ) * chunk;
-        gpuWork[d - 1].treesMaxDevice = temp;
-        gpuWork[d - 1].treesPerDevice = temp - ( d - 1 ) * chunk;
-        temp -= chunk;
-        if ( chunk < temp )
-            temp = chunk;
+    for ( int d = 0; d < numDevices; d++ ) {
+        if (d < (numDevices - 1)){
+            gpuWork[d].offset         = d * chunk;
+            gpuWork[d].treesMaxDevice = (d + 1) * chunk;
+            gpuWork[d].treesPerDevice = chunk;
+        } else {
+            gpuWork[d].offset         = d * chunk;
+            gpuWork[d].treesMaxDevice = maxTrees;
+            gpuWork[d].treesPerDevice = maxTrees - d * chunk;
+        }
     }
 
     // Launch one CPU thread per GPU
