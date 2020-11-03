@@ -42,7 +42,6 @@
 #include <thrust/sort.h>
 #include <thrust/system/cuda/experimental/pinned_allocator.h>
 
-
 // *************** FOR ERROR CHECKING *******************
 #ifndef CUDA_RT_CALL
 #define CUDA_RT_CALL( call )                                                                                           \
@@ -113,7 +112,7 @@ __host__ __device__ unsigned int nchoosek( const int &numerator, const double &d
     unsigned long long n { static_cast<unsigned long long>( numerator ) };
     for ( int f = 1; f < loops; f++ )
         n *= static_cast<unsigned long long>( numerator - f );
-    return ( static_cast<unsigned int>( static_cast<double>( n ) * denominator ) ); // Precalculate
+    return ( static_cast<unsigned int>( static_cast<double>( n ) * denominator ) );  // Precalculate
 }
 
 /*
@@ -171,7 +170,7 @@ __launch_bounds__( k_tpb ) __global__ void tdoa( const unsigned int offset,
     // Allocate shared memory for BlockRadixSort
     __shared__ typename BlockReduce::TempStorage temp_storage;
 
-    unsigned int gid { blockIdx.x * blockDim.x + threadIdx.x }; // Change name
+    unsigned int gid { blockIdx.x * blockDim.x + threadIdx.x };  // Change name
     unsigned int stride { blockDim.x * gridDim.x };
     unsigned int newTid[k_ept] {};
     unsigned int score[k_ept] {};
@@ -217,7 +216,7 @@ __launch_bounds__( k_tpb ) __global__ void tdoa( const unsigned int offset,
                     score[s] = 0u;
 
             } else
-                score[s] = 0u; // For thread ids larger than the number of required combinations
+                score[s] = 0u;  // For thread ids larger than the number of required combinations
         }
 
         unsigned int totalTrees { BlockReduce( temp_storage ).Sum( score ) };
@@ -231,7 +230,7 @@ __launch_bounds__( k_tpb ) __global__ void tdoa( const unsigned int offset,
             atomicAdd( &d_totalTreesPerBlock[0], totalTrees );
 
         // We need to sync the block again because we are using grid-stride looping.
-        block.sync( ); // Sync block to reuse tempStorage for BlockReduce
+        block.sync( );  // Sync block to reuse tempStorage for BlockReduce
     }
 }
 
@@ -239,7 +238,7 @@ int main( int arg, char **argv ) {
 
     // Determine the number of combinations that will be evaluated
     unsigned int maxTrees { nchoosek( k_numVertices, ( 1 / factorial( k_numEdges ) ), k_numEdges ) };
-    if ( maxTrees >= UINT_MAX ) { // maxTrees can't be larger than 4294967295
+    if ( maxTrees >= UINT_MAX ) {  // maxTrees can't be larger than 4294967295
         std::printf( "combos = %d; chains = %u\n", k_numVertices, maxTrees );
         throw std::runtime_error( "The number is chains to test is larger than unsigned int can hold.\n" );
     }
@@ -288,12 +287,12 @@ int main( int arg, char **argv ) {
     unsigned int chunk { static_cast<unsigned int>( maxTrees / numDevices ) };
 
     for ( int d = 0; d < numDevices; d++ ) {
-        if (d < (numDevices - 1)){
-        gpuWork[d].offset         = d * chunk;
-        gpuWork[d].treesMaxDevice = (d + 1) * chunk;
+        if ( d < ( numDevices - 1 ) ) {
+            gpuWork[d].offset         = d * chunk;
+            gpuWork[d].treesMaxDevice = ( d + 1 ) * chunk;
         } else {
             gpuWork[d].offset         = d * chunk;
-        gpuWork[d].treesMaxDevice = maxTrees;
+            gpuWork[d].treesMaxDevice = maxTrees;
         }
     }
 
@@ -314,11 +313,11 @@ int main( int arg, char **argv ) {
 
         // Copy denominators to constant memory
         CUDA_RT_CALL( cudaMemcpyToSymbolAsync( c_denominator,
-                                                  denominator,
-                                                  k_numEdges * sizeof( double ),
-                                                  0,
-                                                  cudaMemcpyHostToDevice,
-                                                  gpuWork[ompId].streams ) );
+                                               denominator,
+                                               k_numEdges * sizeof( double ),
+                                               0,
+                                               cudaMemcpyHostToDevice,
+                                               gpuWork[ompId].streams ) );
 
         // Copy angles to constant memory
         CUDA_RT_CALL( cudaMemcpyToSymbolAsync(
@@ -356,10 +355,10 @@ int main( int arg, char **argv ) {
 
         // Scores and ids are copied back to the CPU in parallel
         CUDA_RT_CALL( cudaMemcpyAsync( &h_totalTrees[ompId],
-                                          gpuWork[ompId].d_totalTreesPerBlock,
-                                          sizeof( unsigned int ),
-                                          cudaMemcpyDeviceToHost,
-                                          gpuWork[ompId].streams ) );
+                                       gpuWork[ompId].d_totalTreesPerBlock,
+                                       sizeof( unsigned int ),
+                                       cudaMemcpyDeviceToHost,
+                                       gpuWork[ompId].streams ) );
 
         // Sync each stream to ensure data copy is complete
         CUDA_RT_CALL( cudaStreamSynchronize( gpuWork[ompId].streams ) );
