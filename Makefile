@@ -6,7 +6,7 @@ LIB_DIR	:=
 LIBS	:=
 
 SOURCES := combinatorials \
-	combosCheck
+		   combosCheck
 
 all: $(SOURCES)
 .PHONY: all
@@ -18,4 +18,6 @@ combosCheck: combosCheck.cu
 	$(NVCC) $(CFLAGS) $(INC_DIR) $(LIB_DIR) ${ARCHES} $^ -o $@ $(LIBS)
 
 clean:
-	rm -f $(SOURCES)
+	@echo 'Cleaning up...'
+	@echo 'rm -rf $(SOURCES)'
+	@rm -rf $(SOURCES) 
